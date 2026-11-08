@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,11 +14,21 @@ struct SubscriberEnd<T> {
     sender: Sender<T>,
     receiver: Receiver<T>,
     dropped: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
 }
 
 pub struct Subscriber<T> {
     receiver: Receiver<T>,
     dropped: Arc<AtomicU64>,
+    closed: Arc<AtomicBool>,
+}
+
+impl<T: Clone + Send> Drop for Broadcast<T> {
+    fn drop(&mut self) {
+        for end in self.senders.lock().unwrap().iter() {
+            end.closed.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl<T: Clone + Send> Default for Broadcast<T> {
@@ -37,12 +47,18 @@ impl<T: Clone + Send> Broadcast<T> {
     pub fn subscribe(&self, capacity: usize) -> Subscriber<T> {
         let (sender, receiver) = bounded(capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
+        let closed = Arc::new(AtomicBool::new(false));
         self.senders.lock().unwrap().push(SubscriberEnd {
             sender,
             receiver: receiver.clone(),
             dropped: Arc::clone(&dropped),
+            closed: Arc::clone(&closed),
         });
-        Subscriber { receiver, dropped }
+        Subscriber {
+            receiver,
+            dropped,
+            closed,
+        }
     }
 
     pub fn publish(&self, item: T) {
@@ -90,6 +106,11 @@ impl<T> Subscriber<T> {
 
     pub fn try_recv(&self) -> Option<T> {
         self.receiver.try_recv().ok()
+    }
+
+    /// True once the producer side is gone (the queue may still hold items).
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 
     /// Items this subscriber lost because it fell behind.
@@ -140,7 +161,9 @@ mod tests {
     fn recv_returns_none_when_broadcast_is_gone() {
         let broadcast = Broadcast::<u32>::new();
         let subscriber = broadcast.subscribe(4);
+        assert!(!subscriber.is_closed());
         drop(broadcast);
+        assert!(subscriber.is_closed());
         assert_eq!(subscriber.recv(), None);
     }
 }
