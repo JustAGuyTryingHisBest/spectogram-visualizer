@@ -1,8 +1,7 @@
 use crate::params::{ParamSpec, ParamValue};
 use crate::types::{IqBlock, SpectrumRow, StreamInfo};
 
-/// Placeholder until the broadcast fan-out lands; wraps a plain receiver.
-pub struct Subscriber<T>(pub crossbeam_channel::Receiver<T>);
+pub use crate::broadcast::Subscriber;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SourceStatus {
