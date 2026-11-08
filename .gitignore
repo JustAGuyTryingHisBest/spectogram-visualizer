@@ -1,5 +1,6 @@
 .superpowers/
 target/
+.direnv/
 !docs/
 !docs/superpowers/
 !docs/superpowers/**

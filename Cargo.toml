@@ -1,0 +1,24 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+spectra-core = { path = "crates/core" }
+spectra-dsp = { path = "crates/dsp" }
+spectra-sources = { path = "crates/sources" }
+anyhow = "1"
+crossbeam-channel = "0.5"
+num-complex = "0.4"
+rustfft = "6.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.10"
+eframe = "0.36.2"
+egui = "0.36.2"
+egui_dock = "0.21.1"
+seify = { version = "0.26.2", default-features = false }
+tempfile = "3"
