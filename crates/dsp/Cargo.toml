@@ -1,0 +1,12 @@
+[package]
+name = "spectra-dsp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+spectra-core.workspace = true
+crossbeam-channel.workspace = true
+num-complex.workspace = true
+rustfft.workspace = true
+serde.workspace = true
