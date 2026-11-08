@@ -19,7 +19,7 @@
 - Rows keep a per-view ring buffer even though nothing scrubs it yet. (spec: Design for later)
 - Defaults: window Blackman-Harris, FFT 2048, averaging 8, units dBFS, colormap inferno. (spec: Calls I made)
 - FFT-stream geometry and units are fixed per connection, sent once in a header. (spec: Calls I made)
-- Build must work with plain `cargo` plus Homebrew/no system libs; Nix is a convenience. (spec: Constraints)
+- Nix manages dependencies: the flake's dev shell provides the toolchain and any system libraries, and all build/test commands run inside `nix develop`. (owner decision 2026-11-08)
 - Variable names are descriptive; no single-letter names outside closures and loop indices (user's global rule).
 
 ## Review Focus
