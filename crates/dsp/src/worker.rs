@@ -327,6 +327,29 @@ mod tests {
     }
 
     #[test]
+    fn sub_band_sets_row_geometry() {
+        let broadcast = Broadcast::new();
+        let worker = ChainWorker::spawn(
+            broadcast.subscribe(16),
+            ChainConfig {
+                fft_size: 256,
+                sub_band: Some(crate::SubBand {
+                    offset_hz: 250e3,
+                    decimation: 4,
+                }),
+                ..ChainConfig::default()
+            },
+            64,
+        );
+        let info = info(None);
+        broadcast.publish(block(&info, 0, 4096));
+        let frame = worker.rows().recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(frame.row.center_hz, 100.25e6);
+        assert_eq!(frame.row.span_hz, 500e3);
+        assert_eq!(frame.row.power_db.len(), 256);
+    }
+
+    #[test]
     fn set_config_rebuilds_chain() {
         let broadcast = Broadcast::new();
         let worker = ChainWorker::spawn(
