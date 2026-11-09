@@ -113,6 +113,16 @@ impl Drop for ChainWorker {
     }
 }
 
+/// Keeps the whole sub-band inside the capture so the NCO never wraps and labels stay honest.
+pub fn clamp_sub_band(sub_band: crate::SubBand, sample_rate_hz: f64) -> crate::SubBand {
+    let decimation = sub_band.decimation.max(1);
+    let limit = sample_rate_hz / 2.0 - sample_rate_hz / (2.0 * f64::from(decimation));
+    crate::SubBand {
+        offset_hz: sub_band.offset_hz.clamp(-limit, limit),
+        decimation,
+    }
+}
+
 fn run(
     input: Subscriber<IqBlock>,
     initial_config: ChainConfig,
@@ -123,6 +133,7 @@ fn run(
     let mut chain = Chain::new(initial_config);
     let mut ddc: Option<crate::subband::Ddc> = None;
     let mut ddc_input_rate = 0.0;
+    let mut last_tuning: Option<(f64, f64)> = None;
     let mut decimated = Vec::new();
     let mut rows_in_window = 0u32;
     let mut window_started = Instant::now();
@@ -157,8 +168,17 @@ fn run(
             *stats.last_drop_at.lock().unwrap() = Some(Instant::now());
         }
 
+        // A retune or rate change makes old traces meaningless against the new axis.
+        let tuning = (block.info.center_hz, block.info.sample_rate_hz);
+        if last_tuning.is_some_and(|previous| previous != tuning) {
+            chain = Chain::new(chain.config().clone());
+            ddc = None;
+        }
+        last_tuning = Some(tuning);
+
         let (center_hz, span_hz) = match chain.config().sub_band {
             Some(sub_band) => {
+                let sub_band = clamp_sub_band(sub_band, block.info.sample_rate_hz);
                 if ddc.is_none() || ddc_input_rate != block.info.sample_rate_hz {
                     ddc = Some(crate::subband::Ddc::new(
                         sub_band,
@@ -324,6 +344,62 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(worker.is_stopped());
+    }
+
+    #[test]
+    fn source_retune_resets_max_hold() {
+        let broadcast = Broadcast::new();
+        let worker = ChainWorker::spawn(
+            broadcast.subscribe(16),
+            ChainConfig {
+                fft_size: 256,
+                window: crate::Window::Rectangular,
+                averaging: 1,
+                max_hold: true,
+                sub_band: None,
+            },
+            64,
+        );
+        let mut loud = info(None);
+        broadcast.publish(IqBlock {
+            info: loud.clone(),
+            samples: Arc::from(vec![Complex32::new(0.9, 0.0); 256]),
+            sequence: 0,
+            received_at: Instant::now(),
+        });
+        let first = worker.rows().recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(first.max_hold_db.unwrap()[128] > -1.0);
+        loud.center_hz += 1e6;
+        broadcast.publish(IqBlock {
+            info: loud,
+            samples: Arc::from(vec![Complex32::new(0.0, 0.0); 256]),
+            sequence: 1,
+            received_at: Instant::now(),
+        });
+        let second = worker.rows().recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(&second.max_hold_db.unwrap()[..], &second.row.power_db[..]);
+    }
+
+    #[test]
+    fn sub_band_offset_is_clamped_to_the_capture() {
+        let broadcast = Broadcast::new();
+        let worker = ChainWorker::spawn(
+            broadcast.subscribe(16),
+            ChainConfig {
+                fft_size: 256,
+                sub_band: Some(crate::SubBand {
+                    offset_hz: 5e6,
+                    decimation: 4,
+                }),
+                ..ChainConfig::default()
+            },
+            64,
+        );
+        let info = info(None);
+        broadcast.publish(block(&info, 0, 4096));
+        let frame = worker.rows().recv_timeout(Duration::from_secs(2)).unwrap();
+        // 2 MS/s capture, ÷4 sub-band: the furthest the sub-band center can sit is ±750 kHz.
+        assert_eq!(frame.row.center_hz, 100e6 + 750e3);
     }
 
     #[test]

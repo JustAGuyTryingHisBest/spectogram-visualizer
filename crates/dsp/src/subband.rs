@@ -7,22 +7,34 @@ use crate::chain::SubBand;
 pub struct Ddc {
     sub_band: SubBand,
     input_rate_hz: f64,
-    phase: f64,
-    phase_step: f64,
+    /// Current NCO phasor, advanced by multiplication and renormalized periodically.
+    phasor: num_complex::Complex64,
+    phasor_step: num_complex::Complex64,
+    samples_since_renormalize: u32,
     taps: Vec<f32>,
     /// Mixed samples not yet consumed by the filter; the first `taps.len() - 1` are history.
     pending: Vec<Complex32>,
 }
 
+/// Taps per unit of decimation: 32D+1 Blackman-windowed sinc taps hold the passband flat to
+/// 0.9 × the output Nyquist and reject anything that would alias into it by more than 70 dB.
+const TAPS_PER_DECIMATION: usize = 32;
+const RENORMALIZE_EVERY: u32 = 1024;
+
 impl Ddc {
     pub fn new(sub_band: SubBand, input_rate_hz: f64) -> Self {
         let decimation = sub_band.decimation.max(1) as usize;
-        let taps = low_pass_taps(8 * decimation + 1, 0.4 / decimation as f64);
+        let taps = low_pass_taps(
+            TAPS_PER_DECIMATION * decimation + 1,
+            0.5 / decimation as f64,
+        );
+        let phase_step = -std::f64::consts::TAU * sub_band.offset_hz / input_rate_hz;
         Self {
             sub_band,
             input_rate_hz,
-            phase: 0.0,
-            phase_step: -std::f64::consts::TAU * sub_band.offset_hz / input_rate_hz,
+            phasor: num_complex::Complex64::new(1.0, 0.0),
+            phasor_step: num_complex::Complex64::from_polar(1.0, phase_step),
+            samples_since_renormalize: 0,
             pending: vec![Complex32::default(); taps.len() - 1],
             taps,
         }
@@ -35,10 +47,14 @@ impl Ddc {
     /// Appends decimated baseband samples to `out`.
     pub fn process(&mut self, input: &[Complex32], out: &mut Vec<Complex32>) {
         for sample in input {
-            let (sin, cos) = self.phase.sin_cos();
-            self.pending
-                .push(sample * Complex32::new(cos as f32, sin as f32));
-            self.phase = (self.phase + self.phase_step).rem_euclid(std::f64::consts::TAU);
+            let mixer = Complex32::new(self.phasor.re as f32, self.phasor.im as f32);
+            self.pending.push(sample * mixer);
+            self.phasor *= self.phasor_step;
+            self.samples_since_renormalize += 1;
+            if self.samples_since_renormalize == RENORMALIZE_EVERY {
+                self.phasor /= self.phasor.norm();
+                self.samples_since_renormalize = 0;
+            }
         }
         let tap_count = self.taps.len();
         let decimation = self.sub_band.decimation.max(1) as usize;
@@ -154,6 +170,30 @@ mod tests {
         assert!(
             in_band_db - out_of_band_db >= 40.0,
             "in {in_band_db} dB, out {out_of_band_db} dB"
+        );
+    }
+
+    #[test]
+    fn ddc_rejects_tone_that_would_alias_into_the_view() {
+        // Output rate 500 kS/s; a tone at 0.65 × output Nyquist beyond the edge folds into the view.
+        let input_rate = 2e6;
+        let sub_band = SubBand {
+            offset_hz: 0.0,
+            decimation: 4,
+        };
+        let mut in_band = Vec::new();
+        Ddc::new(sub_band, input_rate)
+            .process(&tone(16384, 0.38 * 250e3, input_rate), &mut in_band);
+        let mut aliasing = Vec::new();
+        Ddc::new(sub_band, input_rate)
+            .process(&tone(16384, 0.65 * 500e3, input_rate), &mut aliasing);
+        let (_, in_band_db) = peak(&in_band, 2048);
+        let (_, aliasing_db) = peak(&aliasing, 2048);
+        assert!(in_band_db > -1.0, "in-band droop {in_band_db} dB");
+        assert!(
+            in_band_db - aliasing_db >= 40.0,
+            "alias rejection only {} dB",
+            in_band_db - aliasing_db
         );
     }
 
