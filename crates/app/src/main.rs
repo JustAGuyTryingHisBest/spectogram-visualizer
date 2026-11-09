@@ -1,5 +1,7 @@
 mod app;
 mod colormap;
+mod source_panel;
+mod sources;
 mod spectrum_plot;
 mod view;
 mod waterfall;

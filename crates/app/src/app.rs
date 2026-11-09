@@ -1,13 +1,15 @@
 use std::path::Path;
 use std::time::Instant;
 
-use spectra_core::IqSource;
+use spectra_core::SourceHandle;
 use spectra_dsp::ChainWorker;
-use spectra_sources::SigmfSource;
+use spectra_sources::SeifySource;
 
 use crate::colormap::Colormap;
+use crate::source_panel::draw_source_panel;
+use crate::sources::SourceManager;
 use crate::spectrum_plot::draw_spectrum;
-use crate::view::{RowRing, View, ViewMode};
+use crate::view::{RowRing, SourceId, View, ViewMode};
 use crate::waterfall::Waterfall;
 
 const ROW_RING_CAPACITY: usize = 4096;
@@ -15,7 +17,7 @@ const WATERFALL_WIDTH: usize = 2048;
 const WATERFALL_HEIGHT: usize = 1024;
 
 pub struct App {
-    source: Option<Box<dyn IqSource>>,
+    sources: SourceManager,
     worker: Option<ChainWorker>,
     view: View,
     ring: RowRing,
@@ -28,9 +30,9 @@ pub struct App {
 impl App {
     pub fn new(sigmf_path: Option<&Path>) -> Self {
         let mut app = Self {
-            source: None,
+            sources: SourceManager::default(),
             worker: None,
-            view: View::new(1, 1),
+            view: View::new(1, 0),
             ring: RowRing::new(ROW_RING_CAPACITY),
             waterfall: Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT),
             colormap: Colormap::inferno(),
@@ -38,18 +40,79 @@ impl App {
             error: None,
         };
         if let Some(path) = sigmf_path {
-            match SigmfSource::open(path) {
-                Ok(source) => app.attach_source(Box::new(source)),
-                Err(error) => app.error = Some(format!("{error:#}")),
-            }
+            app.open_sigmf(path);
         }
         app
     }
 
-    fn attach_source(&mut self, source: Box<dyn IqSource>) {
-        let worker = ChainWorker::spawn(source.subscribe(), self.view.config.clone(), 256);
-        self.worker = Some(worker);
-        self.source = Some(source);
+    fn open_sigmf(&mut self, path: &Path) {
+        match self.sources.open_sigmf(path) {
+            Ok(id) => self.attach_view_to(id),
+            Err(error) => self.error = Some(format!("{error:#}")),
+        }
+    }
+
+    /// Points the single view at `source_id` and starts a fresh chain worker on it.
+    fn attach_view_to(&mut self, source_id: SourceId) {
+        let Some(SourceHandle::Iq(source)) = self.sources.get(source_id) else {
+            return;
+        };
+        self.worker = Some(ChainWorker::spawn(
+            source.subscribe(),
+            self.view.config.clone(),
+            256,
+        ));
+        self.view.source_id = source_id;
+        self.ring = RowRing::new(ROW_RING_CAPACITY);
+        self.waterfall = Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT);
+        self.error = None;
+    }
+
+    fn draw_source_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Source", |ui| {
+            if ui.button("Open SigMF…").clicked() {
+                ui.close();
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("SigMF metadata", &["sigmf-meta"])
+                    .pick_file()
+                {
+                    self.open_sigmf(&path);
+                }
+            }
+            ui.separator();
+            let devices = SeifySource::enumerate();
+            if devices.is_empty() {
+                ui.label("no devices found");
+            }
+            for device in devices {
+                if ui.button(&device.label).clicked() {
+                    ui.close();
+                    match self.sources.open_device(&device) {
+                        Ok(id) => self.attach_view_to(id),
+                        Err(error) => self.error = Some(format!("{error:#}")),
+                    }
+                }
+            }
+            ui.separator();
+            for id in self.sources.ids() {
+                let selected = id == self.view.source_id;
+                if ui
+                    .selectable_label(selected, self.sources.name(id))
+                    .clicked()
+                {
+                    ui.close();
+                    self.attach_view_to(id);
+                }
+            }
+            if self.sources.get(self.view.source_id).is_some()
+                && ui.button("Close current source").clicked()
+            {
+                ui.close();
+                self.worker = None;
+                self.sources.close(self.view.source_id);
+                self.view.source_id = 0;
+            }
+        });
     }
 
     fn drain_rows(&mut self) {
@@ -80,10 +143,29 @@ impl eframe::App for App {
         self.drain_rows();
         let fps = self.fps();
 
+        egui::Panel::top("toolbar").show(ui, |ui| {
+            ui.horizontal(|ui| {
+                self.draw_source_menu(ui);
+            });
+        });
+
+        if let Some(SourceHandle::Iq(source)) = self.sources.get_mut(self.view.source_id) {
+            egui::Panel::right("source_panel")
+                .default_size(240.0)
+                .show(ui, |ui| {
+                    if let Some(error) = draw_source_panel(ui, source.as_mut()) {
+                        self.error = Some(error);
+                    }
+                });
+        }
+
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                match &self.source {
-                    Some(source) => {
+                match self.sources.get(self.view.source_id) {
+                    Some(SourceHandle::Iq(source)) => {
+                        ui.label(format!("{} · {:?}", source.info().name, source.status()))
+                    }
+                    Some(SourceHandle::Spectrum(source)) => {
                         ui.label(format!("{} · {:?}", source.info().name, source.status()))
                     }
                     None => ui.label("no source"),

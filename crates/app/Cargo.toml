@@ -16,3 +16,4 @@ anyhow.workspace = true
 eframe.workspace = true
 egui.workspace = true
 serde.workspace = true
+rfd.workspace = true
