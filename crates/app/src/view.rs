@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
-use spectra_dsp::{ChainConfig, ChainWorker, RowFrame};
+use spectra_core::{SpectrumRow, Subscriber};
+use spectra_dsp::{ChainConfig, ChainWorker, RowFrame, TraceAccumulator};
 
 use crate::colormap::Colormap;
 use crate::markers::Markers;
@@ -63,7 +64,10 @@ impl View {
 /// A view plus the live state behind it: its chain worker, row history and waterfall texture.
 pub struct ViewRuntime {
     pub view: View,
+    /// Chain worker for IQ sources; `None` for spectrum sources, which feed `spectrum_input`.
     pub worker: Option<ChainWorker>,
+    pub spectrum_input: Option<Subscriber<SpectrumRow>>,
+    traces: TraceAccumulator,
     pub ring: RowRing,
     pub waterfall: Waterfall,
     last_geometry: Option<(f64, usize)>,
@@ -72,8 +76,10 @@ pub struct ViewRuntime {
 impl ViewRuntime {
     pub fn new(view: View) -> Self {
         Self {
+            traces: TraceAccumulator::new(view.config.averaging, view.config.max_hold),
             view,
             worker: None,
+            spectrum_input: None,
             ring: RowRing::new(ROW_RING_CAPACITY),
             waterfall: Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT),
             last_geometry: None,
@@ -107,6 +113,17 @@ impl ViewRuntime {
                 frames.push(frame);
             }
         }
+        if let Some(input) = &self.spectrum_input {
+            while let Some(row) = input.try_recv() {
+                let (average_db, max_hold_db) = self.traces.push(&row.power_db);
+                frames.push(RowFrame {
+                    row,
+                    average_db,
+                    max_hold_db,
+                    source_dropped_blocks: input.dropped(),
+                });
+            }
+        }
         for frame in frames {
             self.ingest(frame, colormap);
         }
@@ -116,6 +133,14 @@ impl ViewRuntime {
         if let Some(worker) = &self.worker {
             worker.set_config(self.view.config.clone());
         }
+        self.traces = TraceAccumulator::new(self.view.config.averaging, self.view.config.max_hold);
+    }
+
+    pub fn reset_max_hold(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.reset_max_hold();
+        }
+        self.traces.reset_max_hold();
     }
 }
 
@@ -203,6 +228,19 @@ mod tests {
         assert_eq!(runtime.waterfall.rows_pushed(), 1);
         runtime.ingest(frame_with_span(1e6, 512), &colormap);
         assert_eq!(runtime.ring.len(), 1);
+    }
+
+    #[test]
+    fn spectrum_source_rows_get_traces_without_a_worker() {
+        let colormap = Colormap::inferno();
+        let broadcast = spectra_core::Broadcast::new();
+        let mut runtime = ViewRuntime::new(View::new(1, 1));
+        runtime.spectrum_input = Some(broadcast.subscribe(8));
+        broadcast.publish(frame_with_span(1e6, 64).row);
+        runtime.drain_worker(&colormap);
+        let latest = runtime.ring.latest().unwrap();
+        assert_eq!(latest.average_db.len(), 64);
+        assert!(latest.max_hold_db.is_some());
     }
 
     #[test]

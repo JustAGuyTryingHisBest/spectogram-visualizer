@@ -10,6 +10,7 @@ const DECIMATIONS: [u32; 6] = [2, 4, 8, 16, 32, 64];
 pub fn draw_view_toolbar(ui: &mut egui::Ui, runtime: &mut ViewRuntime, source_name: &str) -> bool {
     let view = &mut runtime.view;
     let mut config_changed = false;
+    let mut reset_requested = false;
     ui.horizontal_wrapped(|ui| {
         ui.strong(source_name);
         ui.separator();
@@ -37,10 +38,8 @@ pub fn draw_view_toolbar(ui: &mut egui::Ui, runtime: &mut ViewRuntime, source_na
             .add(egui::DragValue::new(&mut view.config.averaging).range(1..=256))
             .changed();
         config_changed |= ui.checkbox(&mut view.config.max_hold, "max hold").changed();
-        if ui.button("reset").clicked()
-            && let Some(worker) = &runtime.worker
-        {
-            worker.reset_max_hold();
+        if ui.button("reset").clicked() {
+            reset_requested = true;
         }
         ui.separator();
 
@@ -110,5 +109,8 @@ pub fn draw_view_toolbar(ui: &mut egui::Ui, runtime: &mut ViewRuntime, source_na
             ui.selectable_value(&mut view.mode, mode, label);
         }
     });
+    if reset_requested {
+        runtime.reset_max_hold();
+    }
     config_changed
 }

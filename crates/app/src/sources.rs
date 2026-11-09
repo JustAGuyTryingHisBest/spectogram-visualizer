@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use std::net::{Ipv4Addr, SocketAddr};
+
 use spectra_core::SourceHandle;
-use spectra_sources::{DeviceSummary, SeifySource, SigmfSource};
+use spectra_sources::{DeviceSummary, FftStreamSource, SeifySource, SigmfSource};
 
 use crate::view::SourceId;
 
@@ -25,6 +27,11 @@ impl SourceManager {
     pub fn open_device(&mut self, summary: &DeviceSummary) -> anyhow::Result<SourceId> {
         let source = SeifySource::open(&summary.args, DEFAULT_CENTER_HZ, DEFAULT_SAMPLE_RATE_HZ)?;
         Ok(self.insert(SourceHandle::Iq(Box::new(source))))
+    }
+
+    pub fn listen_fft_stream(&mut self, port: u16) -> anyhow::Result<SourceId> {
+        let source = FftStreamSource::listen(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))?;
+        Ok(self.insert(SourceHandle::Spectrum(Box::new(source))))
     }
 
     pub fn insert(&mut self, handle: SourceHandle) -> SourceId {

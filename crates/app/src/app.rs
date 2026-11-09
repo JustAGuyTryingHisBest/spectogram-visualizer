@@ -21,6 +21,7 @@ pub struct App {
     views: BTreeMap<ViewId, ViewRuntime>,
     next_view_id: ViewId,
     selected_source: Option<SourceId>,
+    fft_stream_port: u16,
     colormap: Colormap,
     frame_times: Vec<Instant>,
     error: Option<String>,
@@ -34,6 +35,7 @@ impl App {
             views: BTreeMap::new(),
             next_view_id: 0,
             selected_source: None,
+            fft_stream_port: 4590,
             colormap: Colormap::inferno(),
             frame_times: Vec::new(),
             error: None,
@@ -62,12 +64,18 @@ impl App {
         self.next_view_id += 1;
         let view_id = self.next_view_id;
         let mut runtime = ViewRuntime::new(View::new(view_id, source_id));
-        if let Some(SourceHandle::Iq(source)) = self.sources.get(source_id) {
-            runtime.worker = Some(ChainWorker::spawn(
-                source.subscribe(),
-                runtime.view.config.clone(),
-                256,
-            ));
+        match self.sources.get(source_id) {
+            Some(SourceHandle::Iq(source)) => {
+                runtime.worker = Some(ChainWorker::spawn(
+                    source.subscribe(),
+                    runtime.view.config.clone(),
+                    256,
+                ));
+            }
+            Some(SourceHandle::Spectrum(source)) => {
+                runtime.spectrum_input = Some(source.subscribe());
+            }
+            None => {}
         }
         self.views.insert(view_id, runtime);
         self.dock.push_to_focused_leaf(view_id);
@@ -103,6 +111,16 @@ impl App {
                     self.open_sigmf(&path);
                 }
             }
+            ui.horizontal(|ui| {
+                if ui.button("Listen for FFT stream on port").clicked() {
+                    ui.close();
+                    match self.sources.listen_fft_stream(self.fft_stream_port) {
+                        Ok(id) => self.on_source_opened(id),
+                        Err(error) => self.error = Some(format!("{error:#}")),
+                    }
+                }
+                ui.add(egui::DragValue::new(&mut self.fft_stream_port).range(1..=65535));
+            });
             ui.separator();
             let devices = SeifySource::enumerate();
             if devices.is_empty() {
