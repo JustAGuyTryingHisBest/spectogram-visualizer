@@ -5,16 +5,22 @@ use spectra_core::IqSource;
 use spectra_dsp::ChainWorker;
 use spectra_sources::SigmfSource;
 
+use crate::colormap::Colormap;
 use crate::spectrum_plot::draw_spectrum;
-use crate::view::{RowRing, View};
+use crate::view::{RowRing, View, ViewMode};
+use crate::waterfall::Waterfall;
 
 const ROW_RING_CAPACITY: usize = 4096;
+const WATERFALL_WIDTH: usize = 2048;
+const WATERFALL_HEIGHT: usize = 1024;
 
 pub struct App {
     source: Option<Box<dyn IqSource>>,
     worker: Option<ChainWorker>,
     view: View,
     ring: RowRing,
+    waterfall: Waterfall,
+    colormap: Colormap,
     frame_times: Vec<Instant>,
     error: Option<String>,
 }
@@ -26,6 +32,8 @@ impl App {
             worker: None,
             view: View::new(1, 1),
             ring: RowRing::new(ROW_RING_CAPACITY),
+            waterfall: Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT),
+            colormap: Colormap::inferno(),
             frame_times: Vec::new(),
             error: None,
         };
@@ -47,6 +55,12 @@ impl App {
     fn drain_rows(&mut self) {
         if let Some(worker) = &self.worker {
             while let Some(frame) = worker.rows().try_recv() {
+                self.waterfall.push_row(
+                    &frame.row.power_db,
+                    self.view.ref_level_db,
+                    self.view.range_db,
+                    &self.colormap,
+                );
                 self.ring.push(frame);
             }
         }
@@ -90,7 +104,24 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            draw_spectrum(ui, &mut self.view, self.ring.latest());
+            let total = ui.available_rect_before_wrap();
+            match self.view.mode {
+                ViewMode::Spectrum => {
+                    draw_spectrum(ui, &mut self.view, self.ring.latest());
+                }
+                ViewMode::Waterfall => self.waterfall.draw(ui, total),
+                ViewMode::Both => {
+                    let split_y = total.top() + total.height() * 0.4;
+                    let spectrum_rect =
+                        egui::Rect::from_min_max(total.min, egui::pos2(total.right(), split_y));
+                    let waterfall_rect =
+                        egui::Rect::from_min_max(egui::pos2(total.left(), split_y), total.max);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(spectrum_rect), |ui| {
+                        draw_spectrum(ui, &mut self.view, self.ring.latest());
+                    });
+                    self.waterfall.draw(ui, waterfall_rect);
+                }
+            }
         });
 
         ui.ctx().request_repaint();

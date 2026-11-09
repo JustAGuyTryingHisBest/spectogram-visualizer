@@ -1,6 +1,8 @@
 mod app;
+mod colormap;
 mod spectrum_plot;
 mod view;
+mod waterfall;
 
 use std::path::PathBuf;
 
