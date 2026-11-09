@@ -4,6 +4,7 @@ mod source_panel;
 mod sources;
 mod spectrum_plot;
 mod view;
+mod view_toolbar;
 mod waterfall;
 
 use std::path::PathBuf;

@@ -1,9 +1,15 @@
 use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
-use spectra_dsp::{ChainConfig, RowFrame};
+use spectra_dsp::{ChainConfig, ChainWorker, RowFrame};
 
+use crate::colormap::Colormap;
 use crate::spectrum_plot::PlotMapping;
+use crate::waterfall::Waterfall;
+
+pub const ROW_RING_CAPACITY: usize = 4096;
+pub const WATERFALL_WIDTH: usize = 2048;
+pub const WATERFALL_HEIGHT: usize = 1024;
 
 pub type ViewId = u64;
 pub type SourceId = u64;
@@ -48,6 +54,65 @@ impl View {
     }
 }
 
+/// A view plus the live state behind it: its chain worker, row history and waterfall texture.
+pub struct ViewRuntime {
+    pub view: View,
+    pub worker: Option<ChainWorker>,
+    pub ring: RowRing,
+    pub waterfall: Waterfall,
+    last_geometry: Option<(f64, usize)>,
+}
+
+impl ViewRuntime {
+    pub fn new(view: View) -> Self {
+        Self {
+            view,
+            worker: None,
+            ring: RowRing::new(ROW_RING_CAPACITY),
+            waterfall: Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT),
+            last_geometry: None,
+        }
+    }
+
+    /// Stores a row; a change in span or bin count discards history so axes never go stale.
+    pub fn ingest(&mut self, frame: RowFrame, colormap: &Colormap) {
+        let geometry = (frame.row.span_hz, frame.row.power_db.len());
+        if self
+            .last_geometry
+            .is_some_and(|previous| previous != geometry)
+        {
+            self.ring.clear();
+            self.waterfall = Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT);
+        }
+        self.last_geometry = Some(geometry);
+        self.waterfall.push_row(
+            &frame.row.power_db,
+            self.view.ref_level_db,
+            self.view.range_db,
+            colormap,
+        );
+        self.ring.push(frame);
+    }
+
+    pub fn drain_worker(&mut self, colormap: &Colormap) {
+        let mut frames = Vec::new();
+        if let Some(worker) = &self.worker {
+            while let Some(frame) = worker.rows().try_recv() {
+                frames.push(frame);
+            }
+        }
+        for frame in frames {
+            self.ingest(frame, colormap);
+        }
+    }
+
+    pub fn apply_config(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.set_config(self.view.config.clone());
+        }
+    }
+}
+
 /// Fixed-capacity history of rows; kept from day one so history scrubbing can land later.
 pub struct RowRing {
     rows: VecDeque<RowFrame>,
@@ -73,12 +138,13 @@ impl RowRing {
         self.rows.back()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "multi-view geometry change uses this in Task 10")
-    )]
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.rows.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.rows.clear();
     }
 }
 
@@ -102,6 +168,35 @@ mod tests {
             max_hold_db: None,
             source_dropped_blocks: 0,
         }
+    }
+
+    fn frame_with_span(span_hz: f64, bins: usize) -> RowFrame {
+        RowFrame {
+            row: SpectrumRow {
+                center_hz: 0.0,
+                span_hz,
+                units: PowerUnits::Dbfs,
+                power_db: Arc::from(vec![-80.0; bins]),
+                received_at: Instant::now(),
+            },
+            average_db: Arc::from(vec![-80.0; bins]),
+            max_hold_db: None,
+            source_dropped_blocks: 0,
+        }
+    }
+
+    #[test]
+    fn geometry_change_clears_ring() {
+        let colormap = Colormap::inferno();
+        let mut runtime = ViewRuntime::new(View::new(1, 1));
+        runtime.ingest(frame_with_span(2e6, 1024), &colormap);
+        runtime.ingest(frame_with_span(2e6, 1024), &colormap);
+        assert_eq!(runtime.ring.len(), 2);
+        runtime.ingest(frame_with_span(1e6, 1024), &colormap);
+        assert_eq!(runtime.ring.len(), 1);
+        assert_eq!(runtime.waterfall.rows_pushed(), 1);
+        runtime.ingest(frame_with_span(1e6, 512), &colormap);
+        assert_eq!(runtime.ring.len(), 1);
     }
 
     #[test]

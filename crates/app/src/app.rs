@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
 
+use egui_dock::widgets::tab_viewer::OnCloseResponse;
+use egui_dock::{DockArea, DockState, NodePath, TabViewer};
 use spectra_core::SourceHandle;
 use spectra_dsp::ChainWorker;
 use spectra_sources::SeifySource;
@@ -9,19 +12,15 @@ use crate::colormap::Colormap;
 use crate::source_panel::draw_source_panel;
 use crate::sources::SourceManager;
 use crate::spectrum_plot::draw_spectrum;
-use crate::view::{RowRing, SourceId, View, ViewMode};
-use crate::waterfall::Waterfall;
-
-const ROW_RING_CAPACITY: usize = 4096;
-const WATERFALL_WIDTH: usize = 2048;
-const WATERFALL_HEIGHT: usize = 1024;
+use crate::view::{SourceId, View, ViewId, ViewMode, ViewRuntime};
+use crate::view_toolbar::draw_view_toolbar;
 
 pub struct App {
     sources: SourceManager,
-    worker: Option<ChainWorker>,
-    view: View,
-    ring: RowRing,
-    waterfall: Waterfall,
+    dock: DockState<ViewId>,
+    views: BTreeMap<ViewId, ViewRuntime>,
+    next_view_id: ViewId,
+    selected_source: Option<SourceId>,
     colormap: Colormap,
     frame_times: Vec<Instant>,
     error: Option<String>,
@@ -31,10 +30,10 @@ impl App {
     pub fn new(sigmf_path: Option<&Path>) -> Self {
         let mut app = Self {
             sources: SourceManager::default(),
-            worker: None,
-            view: View::new(1, 0),
-            ring: RowRing::new(ROW_RING_CAPACITY),
-            waterfall: Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT),
+            dock: DockState::new(Vec::new()),
+            views: BTreeMap::new(),
+            next_view_id: 0,
+            selected_source: None,
             colormap: Colormap::inferno(),
             frame_times: Vec::new(),
             error: None,
@@ -47,28 +46,53 @@ impl App {
 
     fn open_sigmf(&mut self, path: &Path) {
         match self.sources.open_sigmf(path) {
-            Ok(id) => self.attach_view_to(id),
+            Ok(id) => self.on_source_opened(id),
             Err(error) => self.error = Some(format!("{error:#}")),
         }
     }
 
-    /// Points the single view at `source_id` and starts a fresh chain worker on it.
-    fn attach_view_to(&mut self, source_id: SourceId) {
-        let Some(SourceHandle::Iq(source)) = self.sources.get(source_id) else {
-            return;
-        };
-        self.worker = Some(ChainWorker::spawn(
-            source.subscribe(),
-            self.view.config.clone(),
-            256,
-        ));
-        self.view.source_id = source_id;
-        self.ring = RowRing::new(ROW_RING_CAPACITY);
-        self.waterfall = Waterfall::new(WATERFALL_WIDTH, WATERFALL_HEIGHT);
+    fn on_source_opened(&mut self, source_id: SourceId) {
+        self.selected_source = Some(source_id);
         self.error = None;
+        self.add_view(source_id);
     }
 
-    fn draw_source_menu(&mut self, ui: &mut egui::Ui) {
+    /// Creates a view on `source_id` with its own chain worker and docks it as a new tab.
+    fn add_view(&mut self, source_id: SourceId) {
+        self.next_view_id += 1;
+        let view_id = self.next_view_id;
+        let mut runtime = ViewRuntime::new(View::new(view_id, source_id));
+        if let Some(SourceHandle::Iq(source)) = self.sources.get(source_id) {
+            runtime.worker = Some(ChainWorker::spawn(
+                source.subscribe(),
+                runtime.view.config.clone(),
+                256,
+            ));
+        }
+        self.views.insert(view_id, runtime);
+        self.dock.push_to_focused_leaf(view_id);
+    }
+
+    fn close_source(&mut self, source_id: SourceId) {
+        let doomed: Vec<ViewId> = self
+            .views
+            .iter()
+            .filter(|(_, runtime)| runtime.view.source_id == source_id)
+            .map(|(id, _)| *id)
+            .collect();
+        for view_id in doomed {
+            if let Some(path) = self.dock.find_tab(&view_id) {
+                self.dock.remove_tab(path);
+            }
+            self.views.remove(&view_id);
+        }
+        self.sources.close(source_id);
+        if self.selected_source == Some(source_id) {
+            self.selected_source = self.sources.ids().first().copied();
+        }
+    }
+
+    fn draw_menus(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Source", |ui| {
             if ui.button("Open SigMF…").clicked() {
                 ui.close();
@@ -88,45 +112,43 @@ impl App {
                 if ui.button(&device.label).clicked() {
                     ui.close();
                     match self.sources.open_device(&device) {
-                        Ok(id) => self.attach_view_to(id),
+                        Ok(id) => self.on_source_opened(id),
                         Err(error) => self.error = Some(format!("{error:#}")),
                     }
                 }
             }
             ui.separator();
             for id in self.sources.ids() {
-                let selected = id == self.view.source_id;
+                let selected = self.selected_source == Some(id);
                 if ui
                     .selectable_label(selected, self.sources.name(id))
                     .clicked()
                 {
                     ui.close();
-                    self.attach_view_to(id);
+                    self.selected_source = Some(id);
                 }
             }
-            if self.sources.get(self.view.source_id).is_some()
-                && ui.button("Close current source").clicked()
+            if let Some(selected) = self.selected_source
+                && ui.button("Close selected source").clicked()
             {
                 ui.close();
-                self.worker = None;
-                self.sources.close(self.view.source_id);
-                self.view.source_id = 0;
+                self.close_source(selected);
             }
         });
-    }
-
-    fn drain_rows(&mut self) {
-        if let Some(worker) = &self.worker {
-            while let Some(frame) = worker.rows().try_recv() {
-                self.waterfall.push_row(
-                    &frame.row.power_db,
-                    self.view.ref_level_db,
-                    self.view.range_db,
-                    &self.colormap,
-                );
-                self.ring.push(frame);
+        ui.menu_button("View", |ui| {
+            if self.sources.ids().is_empty() {
+                ui.label("open a source first");
             }
-        }
+            for id in self.sources.ids() {
+                if ui
+                    .button(format!("New view on {}", self.sources.name(id)))
+                    .clicked()
+                {
+                    ui.close();
+                    self.add_view(id);
+                }
+            }
+        });
     }
 
     fn fps(&mut self) -> f32 {
@@ -140,16 +162,18 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_rows();
+        for runtime in self.views.values_mut() {
+            runtime.drain_worker(&self.colormap);
+        }
         let fps = self.fps();
 
         egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                self.draw_source_menu(ui);
-            });
+            ui.horizontal(|ui| self.draw_menus(ui));
         });
 
-        if let Some(SourceHandle::Iq(source)) = self.sources.get_mut(self.view.source_id) {
+        if let Some(SourceHandle::Iq(source)) =
+            self.selected_source.and_then(|id| self.sources.get_mut(id))
+        {
             egui::Panel::right("source_panel")
                 .default_size(240.0)
                 .show(ui, |ui| {
@@ -161,22 +185,22 @@ impl eframe::App for App {
 
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
-                match self.sources.get(self.view.source_id) {
-                    Some(SourceHandle::Iq(source)) => {
-                        ui.label(format!("{} · {:?}", source.info().name, source.status()))
+                let mut total_drops = 0;
+                let mut overloaded = false;
+                let mut rows_per_second = 0.0;
+                for runtime in self.views.values() {
+                    if let Some(worker) = &runtime.worker {
+                        let stats = worker.stats();
+                        total_drops += stats.input_dropped_blocks;
+                        overloaded |= stats.overloaded;
+                        rows_per_second += stats.rows_per_second;
                     }
-                    Some(SourceHandle::Spectrum(source)) => {
-                        ui.label(format!("{} · {:?}", source.info().name, source.status()))
-                    }
-                    None => ui.label("no source"),
-                };
-                if let Some(worker) = &self.worker {
-                    let stats = worker.stats();
-                    ui.label(format!("rows/s {:.0}", stats.rows_per_second));
-                    ui.label(format!("drops {}", stats.input_dropped_blocks));
-                    if stats.overloaded {
-                        ui.colored_label(egui::Color32::RED, "OVERLOAD");
-                    }
+                }
+                ui.label(format!("{} views", self.views.len()));
+                ui.label(format!("rows/s {rows_per_second:.0}"));
+                ui.label(format!("drops {total_drops}"));
+                if overloaded {
+                    ui.colored_label(egui::Color32::RED, "OVERLOAD");
                 }
                 ui.label(format!("{fps:.0} fps"));
                 if let Some(error) = &self.error {
@@ -186,26 +210,77 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            let total = ui.available_rect_before_wrap();
-            match self.view.mode {
-                ViewMode::Spectrum => {
-                    draw_spectrum(ui, &mut self.view, self.ring.latest());
-                }
-                ViewMode::Waterfall => self.waterfall.draw(ui, total),
-                ViewMode::Both => {
-                    let split_y = total.top() + total.height() * 0.4;
-                    let spectrum_rect =
-                        egui::Rect::from_min_max(total.min, egui::pos2(total.right(), split_y));
-                    let waterfall_rect =
-                        egui::Rect::from_min_max(egui::pos2(total.left(), split_y), total.max);
-                    ui.scope_builder(egui::UiBuilder::new().max_rect(spectrum_rect), |ui| {
-                        draw_spectrum(ui, &mut self.view, self.ring.latest());
-                    });
-                    self.waterfall.draw(ui, waterfall_rect);
-                }
-            }
+            let mut tabs = Tabs {
+                views: &mut self.views,
+                sources: &self.sources,
+            };
+            DockArea::new(&mut self.dock)
+                .show_add_buttons(false)
+                .show_inside(ui, &mut tabs);
         });
 
         ui.ctx().request_repaint();
+    }
+}
+
+struct Tabs<'a> {
+    views: &'a mut BTreeMap<ViewId, ViewRuntime>,
+    sources: &'a SourceManager,
+}
+
+impl TabViewer for Tabs<'_> {
+    type Tab = ViewId;
+
+    fn id(&mut self, tab: &mut ViewId) -> egui::Id {
+        egui::Id::new(("view", *tab))
+    }
+
+    fn title(&mut self, tab: &mut ViewId) -> egui::WidgetText {
+        match self.views.get(tab) {
+            Some(runtime) => {
+                format!("{} · {}", tab, self.sources.name(runtime.view.source_id)).into()
+            }
+            None => "closed".into(),
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut ViewId) {
+        let Some(runtime) = self.views.get_mut(tab) else {
+            ui.label("view closed");
+            return;
+        };
+        let source_name = self.sources.name(runtime.view.source_id);
+        if draw_view_toolbar(ui, runtime, &source_name) {
+            runtime.apply_config();
+        }
+        let total = ui.available_rect_before_wrap();
+        match runtime.view.mode {
+            ViewMode::Spectrum => {
+                draw_spectrum(ui, &mut runtime.view, runtime.ring.latest());
+            }
+            ViewMode::Waterfall => runtime.waterfall.draw(ui, total),
+            ViewMode::Both => {
+                let split_y = total.top() + total.height() * 0.4;
+                let spectrum_rect =
+                    egui::Rect::from_min_max(total.min, egui::pos2(total.right(), split_y));
+                let waterfall_rect =
+                    egui::Rect::from_min_max(egui::pos2(total.left(), split_y), total.max);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(spectrum_rect), |ui| {
+                    draw_spectrum(ui, &mut runtime.view, runtime.ring.latest());
+                });
+                runtime.waterfall.draw(ui, waterfall_rect);
+            }
+        }
+    }
+
+    fn on_close(&mut self, tab: &mut ViewId) -> OnCloseResponse {
+        self.views.remove(tab);
+        OnCloseResponse::Close
+    }
+
+    fn context_menu(&mut self, _ui: &mut egui::Ui, _tab: &mut ViewId, _path: NodePath) {}
+
+    fn clear_background(&self, _tab: &ViewId) -> bool {
+        true
     }
 }
