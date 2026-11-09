@@ -4,11 +4,10 @@ use std::time::Instant;
 
 use egui_dock::widgets::tab_viewer::OnCloseResponse;
 use egui_dock::{DockArea, DockState, NodePath, TabViewer};
-use spectra_core::SourceHandle;
+use spectra_core::{SourceHandle, SourceStatus};
 use spectra_dsp::ChainWorker;
-use spectra_sources::SeifySource;
+use spectra_sources::{DeviceSummary, SeifySource};
 
-use crate::colormap::Colormap;
 use crate::layout::{self, SavedLayout};
 use crate::source_panel::draw_source_panel;
 use crate::sources::SourceManager;
@@ -23,7 +22,10 @@ pub struct App {
     next_view_id: ViewId,
     selected_source: Option<SourceId>,
     fft_stream_port: u16,
-    colormap: Colormap,
+    /// Device scan results, refreshed only on demand: a scan takes long enough to stall frames.
+    devices: Vec<DeviceSummary>,
+    /// False when launched on a command-line file, so a one-off run never clobbers the layout.
+    save_layout_on_exit: bool,
     frame_times: Vec<Instant>,
     error: Option<String>,
 }
@@ -37,7 +39,8 @@ impl App {
             next_view_id: 0,
             selected_source: None,
             fft_stream_port: 4590,
-            colormap: Colormap::inferno(),
+            devices: SeifySource::enumerate(),
+            save_layout_on_exit: sigmf_path.is_none(),
             frame_times: Vec::new(),
             error: None,
         };
@@ -54,8 +57,8 @@ impl App {
         app
     }
 
-    /// Rebuilds sources and views from a saved layout; sources that fail to reopen leave
-    /// their views in place showing the error rather than aborting the restore.
+    /// Rebuilds sources and views from a saved layout. Sources that fail to reopen stay listed
+    /// with their error, their views stay in place, and "Retry failed sources" can bind them later.
     fn restore(&mut self, saved: SavedLayout) {
         let mut failures = Vec::new();
         for (id, source) in &saved.sources {
@@ -66,19 +69,7 @@ impl App {
         for view in saved.views {
             let view_id = view.id;
             let mut runtime = ViewRuntime::new(view);
-            match self.sources.get(runtime.view.source_id) {
-                Some(SourceHandle::Iq(source)) => {
-                    runtime.worker = Some(ChainWorker::spawn(
-                        source.subscribe(),
-                        runtime.view.config.clone(),
-                        256,
-                    ));
-                }
-                Some(SourceHandle::Spectrum(source)) => {
-                    runtime.spectrum_input = Some(source.subscribe());
-                }
-                None => {}
-            }
+            self.bind_runtime(&mut runtime);
             self.next_view_id = self.next_view_id.max(view_id);
             self.views.insert(view_id, runtime);
         }
@@ -86,6 +77,23 @@ impl App {
         self.selected_source = self.sources.ids().first().copied();
         if !failures.is_empty() {
             self.error = Some(failures.join("; "));
+        }
+    }
+
+    /// Connects a view's runtime to its source: a chain worker for IQ, a direct feed for spectrum.
+    fn bind_runtime(&self, runtime: &mut ViewRuntime) {
+        match self.sources.get(runtime.view.source_id) {
+            Some(SourceHandle::Iq(source)) => {
+                runtime.worker = Some(ChainWorker::spawn(
+                    source.subscribe(),
+                    runtime.view.config.clone(),
+                    256,
+                ));
+            }
+            Some(SourceHandle::Spectrum(source)) => {
+                runtime.spectrum_input = Some(source.subscribe());
+            }
+            None => {}
         }
     }
 
@@ -125,21 +133,29 @@ impl App {
         self.next_view_id += 1;
         let view_id = self.next_view_id;
         let mut runtime = ViewRuntime::new(View::new(view_id, source_id));
-        match self.sources.get(source_id) {
-            Some(SourceHandle::Iq(source)) => {
-                runtime.worker = Some(ChainWorker::spawn(
-                    source.subscribe(),
-                    runtime.view.config.clone(),
-                    256,
-                ));
-            }
-            Some(SourceHandle::Spectrum(source)) => {
-                runtime.spectrum_input = Some(source.subscribe());
-            }
-            None => {}
-        }
+        self.bind_runtime(&mut runtime);
         self.views.insert(view_id, runtime);
         self.dock.push_to_focused_leaf(view_id);
+    }
+
+    fn retry_failed_sources(&mut self) {
+        let recovered = self.sources.retry_failed();
+        let mut rebound: Vec<ViewRuntime> = Vec::new();
+        for (view_id, runtime) in std::mem::take(&mut self.views) {
+            let mut runtime = runtime;
+            if recovered.contains(&runtime.view.source_id) {
+                self.bind_runtime(&mut runtime);
+            }
+            rebound.push(runtime);
+            let _ = view_id;
+        }
+        self.views = rebound
+            .into_iter()
+            .map(|runtime| (runtime.view.id, runtime))
+            .collect();
+        if self.sources.failed_ids().is_empty() {
+            self.error = None;
+        }
     }
 
     fn close_source(&mut self, source_id: SourceId) {
@@ -183,11 +199,13 @@ impl App {
                 ui.add(egui::DragValue::new(&mut self.fft_stream_port).range(1..=65535));
             });
             ui.separator();
-            let devices = SeifySource::enumerate();
-            if devices.is_empty() {
+            if ui.button("Rescan devices").clicked() {
+                self.devices = SeifySource::enumerate();
+            }
+            if self.devices.is_empty() {
                 ui.label("no devices found");
             }
-            for device in devices {
+            for device in self.devices.clone() {
                 if ui.button(&device.label).clicked() {
                     ui.close();
                     match self.sources.open_device(&device) {
@@ -206,6 +224,11 @@ impl App {
                     ui.close();
                     self.selected_source = Some(id);
                 }
+            }
+            if !self.sources.failed_ids().is_empty() && ui.button("Retry failed sources").clicked()
+            {
+                ui.close();
+                self.retry_failed_sources();
             }
             if let Some(selected) = self.selected_source
                 && ui.button("Close selected source").clicked()
@@ -248,16 +271,55 @@ impl App {
             .retain(|instant| now.duration_since(*instant).as_secs_f32() < 1.0);
         self.frame_times.len() as f32
     }
+
+    fn draw_status_bar(&mut self, ui: &mut egui::Ui, fps: f32) {
+        ui.horizontal_wrapped(|ui| {
+            let mut total_drops = 0;
+            let mut overloaded = false;
+            let mut rows_per_second = 0.0;
+            for runtime in self.views.values() {
+                if let Some(worker) = &runtime.worker {
+                    let stats = worker.stats();
+                    total_drops += stats.input_dropped_blocks;
+                    overloaded |= stats.overloaded;
+                    rows_per_second += stats.rows_per_second;
+                }
+            }
+            ui.label(format!("{} views", self.views.len()));
+            ui.label(format!("rows/s {rows_per_second:.0}"));
+            if let Some(floor_db) = self.noise_floor_db() {
+                ui.label(format!("floor {floor_db:.0} dB"));
+            }
+            ui.label(format!("drops {total_drops}"));
+            if overloaded {
+                ui.colored_label(egui::Color32::RED, "OVERLOAD");
+            }
+            ui.label(format!("{fps:.0} fps"));
+            for id in self.sources.ids() {
+                if let Some(SourceStatus::Stopped(reason)) = self.sources.status(id) {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        format!("{}: stopped ({reason})", self.sources.name(id)),
+                    );
+                }
+            }
+            if let Some(error) = &self.error {
+                ui.colored_label(egui::Color32::RED, error);
+            }
+        });
+    }
 }
 
 impl eframe::App for App {
     fn on_exit(&mut self) {
-        self.save_layout();
+        if self.save_layout_on_exit {
+            self.save_layout();
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         for runtime in self.views.values_mut() {
-            runtime.drain_worker(&self.colormap);
+            runtime.drain_worker();
         }
         let fps = self.fps();
 
@@ -277,34 +339,7 @@ impl eframe::App for App {
                 });
         }
 
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let mut total_drops = 0;
-                let mut overloaded = false;
-                let mut rows_per_second = 0.0;
-                for runtime in self.views.values() {
-                    if let Some(worker) = &runtime.worker {
-                        let stats = worker.stats();
-                        total_drops += stats.input_dropped_blocks;
-                        overloaded |= stats.overloaded;
-                        rows_per_second += stats.rows_per_second;
-                    }
-                }
-                ui.label(format!("{} views", self.views.len()));
-                ui.label(format!("rows/s {rows_per_second:.0}"));
-                if let Some(floor_db) = self.noise_floor_db() {
-                    ui.label(format!("floor {floor_db:.0} dB"));
-                }
-                ui.label(format!("drops {total_drops}"));
-                if overloaded {
-                    ui.colored_label(egui::Color32::RED, "OVERLOAD");
-                }
-                ui.label(format!("{fps:.0} fps"));
-                if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::RED, error);
-                }
-            });
-        });
+        egui::Panel::bottom("status").show(ui, |ui| self.draw_status_bar(ui, fps));
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let mut tabs = Tabs {
@@ -347,15 +382,21 @@ impl TabViewer for Tabs<'_> {
             return;
         };
         let source_name = self.sources.name(runtime.view.source_id);
-        if draw_view_toolbar(ui, runtime, &source_name) {
+        let source_status = self.sources.status(runtime.view.source_id);
+        if draw_view_toolbar(ui, runtime, &source_name, source_status.as_ref()) {
             runtime.apply_config();
         }
         let total = ui.available_rect_before_wrap();
+        let (ref_level_db, range_db) = (runtime.view.ref_level_db, runtime.view.range_db);
         match runtime.view.mode {
             ViewMode::Spectrum => {
                 draw_spectrum(ui, &mut runtime.view, runtime.ring.latest());
             }
-            ViewMode::Waterfall => runtime.waterfall.draw(ui, total),
+            ViewMode::Waterfall => {
+                runtime
+                    .waterfall
+                    .draw(ui, total, ref_level_db, range_db, &runtime.colormap)
+            }
             ViewMode::Both => {
                 let split_y = total.top() + total.height() * 0.4;
                 let spectrum_rect =
@@ -365,7 +406,13 @@ impl TabViewer for Tabs<'_> {
                 ui.scope_builder(egui::UiBuilder::new().max_rect(spectrum_rect), |ui| {
                     draw_spectrum(ui, &mut runtime.view, runtime.ring.latest());
                 });
-                runtime.waterfall.draw(ui, waterfall_rect);
+                runtime.waterfall.draw(
+                    ui,
+                    waterfall_rect,
+                    ref_level_db,
+                    range_db,
+                    &runtime.colormap,
+                );
             }
         }
     }

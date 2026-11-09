@@ -1,5 +1,7 @@
+use spectra_core::SourceStatus;
 use spectra_dsp::{SubBand, Window};
 
+use crate::colormap::ColormapKind;
 use crate::source_panel::{format_hz, parse_hz};
 use crate::view::{ViewMode, ViewRuntime};
 
@@ -7,12 +9,32 @@ const FFT_SIZES: [usize; 9] = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 6
 const DECIMATIONS: [u32; 6] = [2, 4, 8, 16, 32, 64];
 
 /// Per-view controls. Returns true when the chain configuration changed.
-pub fn draw_view_toolbar(ui: &mut egui::Ui, runtime: &mut ViewRuntime, source_name: &str) -> bool {
+pub fn draw_view_toolbar(
+    ui: &mut egui::Ui,
+    runtime: &mut ViewRuntime,
+    source_name: &str,
+    source_status: Option<&SourceStatus>,
+) -> bool {
     let view = &mut runtime.view;
     let mut config_changed = false;
     let mut reset_requested = false;
+    let mut colormap_changed = false;
     ui.horizontal_wrapped(|ui| {
         ui.strong(source_name);
+        match source_status {
+            Some(SourceStatus::Streaming) => {
+                ui.colored_label(egui::Color32::from_rgb(0x6f, 0xd4, 0x9a), "● streaming");
+            }
+            Some(SourceStatus::Paused) => {
+                ui.colored_label(egui::Color32::YELLOW, "❚❚ paused");
+            }
+            Some(SourceStatus::Stopped(reason)) => {
+                ui.colored_label(egui::Color32::RED, format!("■ stopped: {reason}"));
+            }
+            None => {
+                ui.colored_label(egui::Color32::RED, "■ source closed");
+            }
+        }
         ui.separator();
 
         egui::ComboBox::from_id_salt(("fft", view.id))
@@ -96,6 +118,17 @@ pub fn draw_view_toolbar(ui: &mut egui::Ui, runtime: &mut ViewRuntime, source_na
         );
         ui.separator();
 
+        egui::ComboBox::from_id_salt(("colormap", view.id))
+            .selected_text(view.colormap.label())
+            .show_ui(ui, |ui| {
+                for kind in ColormapKind::ALL {
+                    colormap_changed |= ui
+                        .selectable_value(&mut view.colormap, kind, kind.label())
+                        .changed();
+                }
+            });
+        ui.separator();
+
         ui.checkbox(&mut view.show_live, "live");
         ui.checkbox(&mut view.show_average, "avg");
         ui.checkbox(&mut view.show_max_hold, "max");
@@ -111,6 +144,9 @@ pub fn draw_view_toolbar(ui: &mut egui::Ui, runtime: &mut ViewRuntime, source_na
     });
     if reset_requested {
         runtime.reset_max_hold();
+    }
+    if colormap_changed {
+        runtime.apply_colormap();
     }
     config_changed
 }
