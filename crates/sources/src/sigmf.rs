@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
-use num_complex::Complex32;
+use rustfft::num_complex::Complex32;
 use serde::Deserialize;
 use spectra_core::{
     Broadcast, IqBlock, IqSource, ParamKind, ParamSpec, ParamValue, SourceStatus, StreamInfo,

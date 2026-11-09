@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use num_complex::Complex32;
+use rustfft::num_complex::Complex32;
 use rustfft::{Fft, FftPlanner};
 use serde::{Deserialize, Serialize};
 
@@ -189,7 +189,7 @@ impl TraceAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use num_complex::Complex32;
+    use rustfft::num_complex::Complex32;
     use std::f32::consts::TAU;
 
     fn tone(sample_count: usize, cycles_per_sample: f32) -> Vec<Complex32> {

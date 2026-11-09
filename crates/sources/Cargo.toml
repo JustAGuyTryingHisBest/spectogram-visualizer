@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 spectra-core.workspace = true
 anyhow.workspace = true
-num-complex.workspace = true
+rustfft.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 seify = { workspace = true, features = ["hackrf", "rtlsdr", "uhd"] }

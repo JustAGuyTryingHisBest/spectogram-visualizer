@@ -4,7 +4,7 @@ use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, bail};
-use num_complex::Complex32;
+use rustfft::num_complex::Complex32;
 use seify::{Args, DynDevice, RxStreamer};
 use spectra_core::{
     Broadcast, IqBlock, IqSource, ParamKind, ParamSpec, ParamValue, SourceStatus, StreamInfo,

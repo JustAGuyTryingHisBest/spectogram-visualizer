@@ -193,7 +193,7 @@ fn run(
             }
             None => (block.info.center_hz, block.info.sample_rate_hz),
         };
-        let samples: &[num_complex::Complex32] = match ddc.as_mut() {
+        let samples: &[rustfft::num_complex::Complex32] = match ddc.as_mut() {
             Some(ddc) => {
                 decimated.clear();
                 ddc.process(&block.samples, &mut decimated);
@@ -245,7 +245,7 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use num_complex::Complex32;
+    use rustfft::num_complex::Complex32;
     use spectra_core::{Broadcast, IqBlock, PowerUnits, StreamInfo};
     use std::sync::Arc;
     use std::time::{Duration, Instant};

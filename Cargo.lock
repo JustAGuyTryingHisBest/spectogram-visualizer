@@ -3785,7 +3785,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
- "num-complex",
+ "rustfft",
  "serde",
 ]
 
@@ -3794,7 +3794,6 @@ name = "spectra-dsp"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
- "num-complex",
  "rustfft",
  "serde",
  "spectra-core",
@@ -3805,7 +3804,7 @@ name = "spectra-sources"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "num-complex",
+ "rustfft",
  "seify",
  "serde",
  "serde_json",

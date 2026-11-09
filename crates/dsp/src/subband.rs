@@ -1,4 +1,4 @@
-use num_complex::Complex32;
+use rustfft::num_complex::{Complex32, Complex64};
 
 use crate::chain::SubBand;
 
@@ -8,8 +8,8 @@ pub struct Ddc {
     sub_band: SubBand,
     input_rate_hz: f64,
     /// Current NCO phasor, advanced by multiplication and renormalized periodically.
-    phasor: num_complex::Complex64,
-    phasor_step: num_complex::Complex64,
+    phasor: Complex64,
+    phasor_step: Complex64,
     samples_since_renormalize: u32,
     taps: Vec<f32>,
     /// Mixed samples not yet consumed by the filter; the first `taps.len() - 1` are history.
@@ -32,8 +32,8 @@ impl Ddc {
         Self {
             sub_band,
             input_rate_hz,
-            phasor: num_complex::Complex64::new(1.0, 0.0),
-            phasor_step: num_complex::Complex64::from_polar(1.0, phase_step),
+            phasor: Complex64::new(1.0, 0.0),
+            phasor_step: Complex64::from_polar(1.0, phase_step),
             samples_since_renormalize: 0,
             pending: vec![Complex32::default(); taps.len() - 1],
             taps,

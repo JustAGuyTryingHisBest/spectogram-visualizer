@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use num_complex::Complex32;
+use rustfft::num_complex::Complex32;
 use serde::{Deserialize, Serialize};
 
 /// Metadata every source stamps on what it emits.
