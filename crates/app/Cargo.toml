@@ -1,0 +1,18 @@
+[package]
+name = "spectra"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "spectra"
+path = "src/main.rs"
+
+[dependencies]
+spectra-core.workspace = true
+spectra-dsp.workspace = true
+spectra-sources.workspace = true
+anyhow.workspace = true
+eframe.workspace = true
+egui.workspace = true
+serde.workspace = true
