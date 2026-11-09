@@ -19,6 +19,7 @@ fn header(units: u8, center_hz: f64, span_hz: f64, bin_count: u32) -> Vec<u8> {
 
 fn frame(timestamp_ns: u64, power: &[f32]) -> Vec<u8> {
     let mut bytes = timestamp_ns.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&(power.len() as u32).to_le_bytes());
     for value in power {
         bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -87,12 +88,33 @@ fn rejects_bad_magic_and_accepts_next_connection() {
 }
 
 #[test]
+fn frame_bin_count_mismatch_closes_connection() {
+    let source = FftStreamSource::listen("127.0.0.1:0".parse().unwrap()).unwrap();
+    let subscriber = source.subscribe();
+    let mut producer = TcpStream::connect(source.local_addr()).unwrap();
+    producer.write_all(&header(0, 50e6, 2e6, 16)).unwrap();
+    producer.write_all(&frame(1, &[-40.0; 8])).unwrap();
+    let status = wait_for_status(
+        &source,
+        |status| matches!(status, SourceStatus::Stopped(reason) if reason.contains("bin count")),
+    );
+    assert!(
+        matches!(&status, SourceStatus::Stopped(reason) if reason.contains("bin count")),
+        "{status:?}"
+    );
+    assert!(subscriber.try_recv().is_none());
+}
+
+#[test]
 fn short_frame_closes_connection() {
     let source = FftStreamSource::listen("127.0.0.1:0".parse().unwrap()).unwrap();
     let subscriber = source.subscribe();
     let mut producer = TcpStream::connect(source.local_addr()).unwrap();
     producer.write_all(&header(0, 50e6, 2e6, 512)).unwrap();
-    producer.write_all(&[0u8; 100]).unwrap();
+    // Valid prefix (timestamp + matching bin count) followed by only 100 of 2048 payload bytes.
+    producer
+        .write_all(&frame(1, &[-40.0; 512])[..12 + 100])
+        .unwrap();
     drop(producer);
     let status = wait_for_status(
         &source,

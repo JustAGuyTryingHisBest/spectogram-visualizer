@@ -25,6 +25,7 @@ fn main() -> std::io::Result<()> {
     loop {
         let sweep_bin = (frame_index % u64::from(bin_count)) as f32;
         let mut frame = (frame_index * 20_000_000).to_le_bytes().to_vec();
+        frame.extend_from_slice(&bin_count.to_le_bytes());
         for bin in 0..bin_count {
             let distance = (bin as f32 - sweep_bin).abs();
             let power = -100.0

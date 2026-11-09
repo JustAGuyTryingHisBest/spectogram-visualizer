@@ -14,6 +14,8 @@ const MAGIC: &[u8; 4] = b"SPEC";
 const VERSION: u16 = 1;
 const HEADER_LEN: usize = 4 + 2 + 1 + 1 + 8 + 8 + 4;
 const MAX_BINS: u32 = 1_048_576;
+/// Each frame starts with a u64 timestamp and a u32 bin count that must match the header.
+const FRAME_PREFIX_LEN: usize = 8 + 4;
 
 struct Shared {
     info: Mutex<StreamInfo>,
@@ -193,12 +195,23 @@ fn serve_connection(
     }
     *shared.status.lock().unwrap() = SourceStatus::Streaming;
 
-    let mut frame_bytes = vec![0u8; 8 + header.bin_count * 4];
+    let mut prefix = [0u8; FRAME_PREFIX_LEN];
+    let mut payload = vec![0u8; header.bin_count * 4];
     loop {
-        if !read_exact_patient(&mut stream, &mut frame_bytes, shared).context("reading frame")? {
+        if !read_exact_patient(&mut stream, &mut prefix, shared).context("reading frame")? {
             return Ok(());
         }
-        let power_db: Vec<f32> = frame_bytes[8..]
+        let frame_bin_count = u32::from_le_bytes(prefix[8..12].try_into().unwrap()) as usize;
+        if frame_bin_count != header.bin_count {
+            bail!(
+                "frame bin count {frame_bin_count} does not match header bin count {}",
+                header.bin_count
+            );
+        }
+        if !read_exact_patient(&mut stream, &mut payload, shared).context("reading frame")? {
+            bail!("reading frame: producer closed after a frame prefix");
+        }
+        let power_db: Vec<f32> = payload
             .as_chunks::<4>()
             .0
             .iter()

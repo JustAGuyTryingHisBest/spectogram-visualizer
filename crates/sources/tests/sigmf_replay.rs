@@ -5,6 +5,30 @@ use std::time::{Duration, Instant};
 use spectra_core::{IqSource, ParamValue, SourceStatus};
 use spectra_sources::SigmfSource;
 
+#[test]
+fn rejects_non_positive_sample_rate() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = write_recording(dir.path(), "cf32_le", &cf32_bytes(16), 0.0);
+    let error = SigmfSource::open(&meta).err().unwrap().to_string();
+    assert!(error.contains("sample_rate"), "{error}");
+}
+
+#[test]
+fn position_param_seeks_while_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = write_recording(dir.path(), "cf32_le", &cf32_bytes(65536), 1e6);
+    let mut source = SigmfSource::open(&meta).unwrap();
+    source
+        .set_param("paused", ParamValue::Toggle(true))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(30));
+    source
+        .set_param("position", ParamValue::Number(40000.0))
+        .unwrap();
+    assert_eq!(source.param("position"), Some(ParamValue::Number(40000.0)));
+    assert!(source.params().iter().any(|spec| spec.key == "position"));
+}
+
 fn write_recording(dir: &Path, datatype: &str, data: &[u8], sample_rate: f64) -> PathBuf {
     let meta_path = dir.join("rec.sigmf-meta");
     let meta = format!(

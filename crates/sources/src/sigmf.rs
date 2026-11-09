@@ -133,6 +133,9 @@ impl SigmfSource {
             .global
             .sample_rate
             .ok_or_else(|| anyhow!("core:sample_rate missing"))?;
+        if !(sample_rate_hz > 0.0 && sample_rate_hz.is_finite()) {
+            bail!("core:sample_rate must be a positive number, got {sample_rate_hz}");
+        }
         let center_hz = metadata
             .captures
             .first()
@@ -268,6 +271,16 @@ impl IqSource for SigmfSource {
                     unit: "x",
                 },
             },
+            ParamSpec {
+                key: "position".into(),
+                label: "Position".into(),
+                kind: ParamKind::Range {
+                    min: 0.0,
+                    max: self.total_samples as f64,
+                    step: (self.total_samples / 1000).max(1) as f64,
+                    unit: "samples",
+                },
+            },
         ]
     }
 
@@ -280,6 +293,7 @@ impl IqSource for SigmfSource {
                 self.shared.looping.load(Ordering::Relaxed),
             )),
             "speed" => Some(ParamValue::Number(*self.shared.speed.lock().unwrap())),
+            "position" => Some(ParamValue::Number(self.position() as f64)),
             _ => None,
         }
     }
@@ -289,6 +303,9 @@ impl IqSource for SigmfSource {
             ("paused", ParamValue::Toggle(paused)) => self.set_paused(paused),
             ("loop", ParamValue::Toggle(looping)) => self.set_loop(looping),
             ("speed", ParamValue::Number(speed)) => self.set_speed(speed),
+            ("position", ParamValue::Number(sample_index)) => {
+                self.seek(sample_index.max(0.0) as u64)
+            }
             (key, value) => bail!("unknown parameter {key} = {value:?}"),
         }
         Ok(())
@@ -344,9 +361,13 @@ impl Reader {
             samples.clear();
             self.format
                 .convert(&byte_buffer[..byte_count], &mut samples);
-            self.shared
-                .position
-                .store(position + block_samples as u64, Ordering::Relaxed);
+            // A seek that landed while we were reading must win over our advance.
+            let _ = self.shared.position.compare_exchange(
+                position,
+                position + block_samples as u64,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
             *self.shared.status.lock().unwrap() = SourceStatus::Streaming;
 
             let speed = *self.shared.speed.lock().unwrap();

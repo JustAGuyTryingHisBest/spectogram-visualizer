@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
@@ -13,6 +13,7 @@ use spectra_core::{
 
 const BLOCK_SAMPLES: usize = 16384;
 const READ_TIMEOUT_US: i64 = 200_000;
+const RESTART_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// One device found by enumeration, ready to open.
 #[derive(Clone, Debug)]
@@ -27,6 +28,11 @@ struct Shared {
     stop: AtomicBool,
     /// Set while the UI changes the sample rate so the reader pauses the stream.
     restart: AtomicBool,
+    /// Raised by the reader once it has deactivated the stream in response to `restart`.
+    reader_idle: AtomicBool,
+    /// Whether the last rate change saw the reader go idle before the rate was set.
+    restart_acknowledged: AtomicBool,
+    overruns: AtomicU64,
 }
 
 /// Any radio seify can open: HackRF, RTL-SDR, USRP B2xx.
@@ -55,6 +61,12 @@ impl SeifySource {
     ) -> anyhow::Result<Self> {
         let device = DynDevice::from_args(args.clone()).context("opening device")?;
         let rx = device.rx(0).context("device has no RX channel")?;
+        // Devices differ widely in supported rates (RTL-SDR tops out near 3.2 MS/s).
+        let initial_sample_rate_hz = rx
+            .sample_rate()
+            .range()
+            .map(|range| range.closest(initial_sample_rate_hz))
+            .unwrap_or(initial_sample_rate_hz);
         rx.sample_rate()
             .set(initial_sample_rate_hz)
             .context("setting sample rate")?;
@@ -72,6 +84,9 @@ impl SeifySource {
             status: Mutex::new(SourceStatus::Streaming),
             stop: AtomicBool::new(false),
             restart: AtomicBool::new(false),
+            reader_idle: AtomicBool::new(false),
+            restart_acknowledged: AtomicBool::new(false),
+            overruns: AtomicU64::new(0),
         });
         let broadcast = Arc::new(Broadcast::new());
 
@@ -87,6 +102,16 @@ impl SeifySource {
             shared,
             broadcast,
         })
+    }
+
+    /// Blocks dropped by the device itself (USB overruns), as opposed to subscriber drops.
+    pub fn overruns(&self) -> u64 {
+        self.shared.overruns.load(Ordering::Relaxed)
+    }
+
+    /// True when the last sample-rate change waited for the reader to stop streaming first.
+    pub fn reader_acknowledged_restart(&self) -> bool {
+        self.shared.restart_acknowledged.load(Ordering::SeqCst)
     }
 
     fn rx(&self) -> anyhow::Result<seify::RxChannel<'_, DynDevice>> {
@@ -200,8 +225,17 @@ impl IqSource for SeifySource {
                 self.shared.info.lock().unwrap().center_hz = rx.frequency().value().unwrap_or(*hz);
             }
             ("sample_rate_hz", ParamValue::Number(rate)) => {
-                // The reader deactivates its stream while this flag is set.
+                // The reader deactivates its stream while this flag is set; wait for it so the
+                // rate never changes under a live stream.
                 self.shared.restart.store(true, Ordering::SeqCst);
+                let deadline = Instant::now() + RESTART_ACK_TIMEOUT;
+                while !self.shared.reader_idle.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+                self.shared.restart_acknowledged.store(
+                    self.shared.reader_idle.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
                 let result = rx.sample_rate().set(*rate);
                 self.shared.info.lock().unwrap().sample_rate_hz =
                     rx.sample_rate().value().unwrap_or(*rate);
@@ -259,7 +293,8 @@ fn read_loop(device: DynDevice, shared: Arc<Shared>, broadcast: Arc<Broadcast<Iq
                 let _ = streamer.deactivate();
                 active = false;
             }
-            thread::sleep(std::time::Duration::from_millis(5));
+            shared.reader_idle.store(true, Ordering::SeqCst);
+            thread::sleep(std::time::Duration::from_millis(1));
             continue;
         }
         if !active {
@@ -268,6 +303,7 @@ fn read_loop(device: DynDevice, shared: Arc<Shared>, broadcast: Arc<Broadcast<Iq
                 return;
             }
             active = true;
+            shared.reader_idle.store(false, Ordering::SeqCst);
         }
         match streamer.read(&mut [&mut buffer], READ_TIMEOUT_US) {
             Ok(0) => continue,
@@ -281,7 +317,13 @@ fn read_loop(device: DynDevice, shared: Arc<Shared>, broadcast: Arc<Broadcast<Iq
                 });
                 sequence += 1;
             }
+            // Timeouts and device overruns are routine; only other errors end the stream.
+            Err(seify::Error::Timeout) => continue,
             Err(seify::Error::Io(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+                continue;
+            }
+            Err(seify::Error::Overrun) => {
+                shared.overruns.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             Err(error) => {
@@ -297,6 +339,7 @@ fn read_loop(device: DynDevice, shared: Arc<Shared>, broadcast: Arc<Broadcast<Iq
 mod tests {
     use super::*;
     use spectra_core::{IqSource, ParamValue};
+    use std::time::Duration;
 
     #[test]
     fn dummy_device_exposes_core_params() {
@@ -311,5 +354,25 @@ mod tests {
             .unwrap();
         assert_eq!(source.info().center_hz, 433e6);
         assert_eq!(source.param("center_hz"), Some(ParamValue::Number(433e6)));
+    }
+
+    #[test]
+    fn sample_rate_change_pauses_the_reader_then_resumes() {
+        let args = seify::Args::from("driver=dummy").unwrap();
+        let mut source = SeifySource::open(&args, 915e6, 2e6).unwrap();
+        let subscriber = source.subscribe();
+        assert!(subscriber.recv_timeout(Duration::from_secs(1)).is_some());
+        source
+            .set_param("sample_rate_hz", ParamValue::Number(4e6))
+            .unwrap();
+        assert!(source.reader_acknowledged_restart());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut saw_new_rate = false;
+        while Instant::now() < deadline {
+            if let Some(block) = subscriber.try_recv() {
+                saw_new_rate |= block.info.sample_rate_hz == 4e6;
+            }
+        }
+        assert!(saw_new_rate);
     }
 }
