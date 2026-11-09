@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use spectra_dsp::{ChainConfig, ChainWorker, RowFrame};
 
 use crate::colormap::Colormap;
+use crate::markers::Markers;
 use crate::spectrum_plot::PlotMapping;
 use crate::waterfall::Waterfall;
 
@@ -33,8 +34,11 @@ pub struct View {
     pub show_average: bool,
     pub show_max_hold: bool,
     pub mode: ViewMode,
+    pub markers: Markers,
     #[serde(skip)]
     pub last_mapping: Option<PlotMapping>,
+    #[serde(skip)]
+    pub dragging_marker: Option<u8>,
 }
 
 impl View {
@@ -49,7 +53,9 @@ impl View {
             show_average: true,
             show_max_hold: true,
             mode: ViewMode::Both,
+            markers: Markers::default(),
             last_mapping: None,
+            dragging_marker: None,
         }
     }
 }

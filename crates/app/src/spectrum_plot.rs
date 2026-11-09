@@ -1,11 +1,16 @@
 use egui::{Color32, Pos2, Rect, Sense, Shape, Stroke, pos2};
 use spectra_dsp::RowFrame;
 
+use crate::markers::marker_readout;
+use crate::source_panel::format_hz;
 use crate::view::View;
 
 pub const LIVE_COLOR: Color32 = Color32::from_rgb(0x8f, 0xb6, 0xff);
 pub const AVERAGE_COLOR: Color32 = Color32::from_rgb(0x6f, 0xd4, 0x9a);
 pub const MAX_HOLD_COLOR: Color32 = Color32::from_rgb(0xff, 0x8c, 0x42);
+pub const MARKER_COLOR: Color32 = Color32::from_rgb(0xff, 0xd3, 0x6b);
+const MARKER_GRAB_PX: f32 = 6.0;
+const PEAK_SNAP_BINS: usize = 20;
 const GRID_COLOR: Color32 = Color32::from_rgb(0x1e, 0x25, 0x34);
 const LABEL_COLOR: Color32 = Color32::from_rgb(0x8a, 0x94, 0xa8);
 const BACKGROUND: Color32 = Color32::from_rgb(0x0b, 0x0e, 0x14);
@@ -35,13 +40,11 @@ impl PlotMapping {
         self.rect
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "markers use this in Task 11"))]
     pub fn x_for_hz(&self, hz: f64) -> f32 {
         let fraction = (hz - self.low_hz) / (self.high_hz - self.low_hz);
         self.rect.left() + fraction as f32 * self.rect.width()
     }
 
-    #[cfg_attr(not(test), expect(dead_code, reason = "markers use this in Task 11"))]
     pub fn hz_for_x(&self, x: f32) -> f64 {
         let fraction = f64::from((x - self.rect.left()) / self.rect.width());
         self.low_hz + fraction * (self.high_hz - self.low_hz)
@@ -92,7 +95,118 @@ pub fn draw_spectrum(
     if view.show_live {
         draw_trace(&painter, &mapping, &row.power_db, LIVE_COLOR);
     }
+
+    handle_marker_input(ui, view, &mapping, row, &response);
+    draw_markers(&painter, &mapping, view, row);
     response
+}
+
+/// Left click adds a marker, dragging a marker line moves it, right click removes it,
+/// and `P` snaps the marker under the pointer to the nearest peak.
+fn handle_marker_input(
+    ui: &egui::Ui,
+    view: &mut View,
+    mapping: &PlotMapping,
+    row: &spectra_core::SpectrumRow,
+    response: &egui::Response,
+) {
+    let Some(pointer) = response
+        .interact_pointer_pos()
+        .or_else(|| response.hover_pos())
+    else {
+        if !response.dragged() {
+            view.dragging_marker = None;
+        }
+        return;
+    };
+    let nearest = view
+        .markers
+        .iter()
+        .map(|marker| {
+            (
+                marker.index,
+                (mapping.x_for_hz(marker.hz) - pointer.x).abs(),
+            )
+        })
+        .filter(|(_, distance)| *distance <= MARKER_GRAB_PX)
+        .min_by(|left, right| left.1.total_cmp(&right.1))
+        .map(|(index, _)| index);
+
+    if response.drag_started() {
+        view.dragging_marker = nearest;
+    }
+    if response.dragged()
+        && let Some(index) = view.dragging_marker
+    {
+        view.markers.set_hz(index, mapping.hz_for_x(pointer.x));
+    }
+    if response.drag_stopped() {
+        view.dragging_marker = None;
+    }
+    if response.clicked() {
+        if nearest.is_none() {
+            view.markers.add_at(mapping.hz_for_x(pointer.x));
+        }
+    } else if response.secondary_clicked()
+        && let Some(index) = nearest
+    {
+        view.markers.remove(index);
+    }
+    if ui.input(|input| input.key_pressed(egui::Key::P))
+        && let Some(index) = nearest
+    {
+        view.markers.snap_to_peak(index, row, PEAK_SNAP_BINS);
+    }
+}
+
+fn draw_markers(
+    painter: &egui::Painter,
+    mapping: &PlotMapping,
+    view: &View,
+    row: &spectra_core::SpectrumRow,
+) {
+    if view.markers.is_empty() {
+        return;
+    }
+    let rect = mapping.rect();
+    let font = egui::FontId::monospace(11.0);
+    let readouts = marker_readout(&view.markers, row);
+    for readout in &readouts {
+        let x = mapping.x_for_hz(readout.hz);
+        painter.line_segment(
+            [pos2(x, rect.top()), pos2(x, rect.bottom())],
+            Stroke::new(1.0, MARKER_COLOR),
+        );
+        let y = mapping.y_for_db(readout.db);
+        painter.circle_filled(pos2(x, y), 3.0, MARKER_COLOR);
+        painter.text(
+            pos2(x + 4.0, rect.top() + 14.0),
+            egui::Align2::LEFT_TOP,
+            format!("M{}", readout.index),
+            font.clone(),
+            MARKER_COLOR,
+        );
+    }
+    let mut lines = Vec::new();
+    for readout in &readouts {
+        let mut line = format!(
+            "M{} {} {:.1} dB",
+            readout.index,
+            format_hz(readout.hz),
+            readout.db
+        );
+        if let Some((delta_hz, delta_db)) = readout.delta_from_first {
+            line.push_str(&format!("  Δ {} {:+.1} dB", format_hz(delta_hz), delta_db));
+        }
+        lines.push(line);
+    }
+    painter.text(
+        pos2(rect.right() - 6.0, rect.top() + 14.0),
+        egui::Align2::RIGHT_TOP,
+        lines.join("\n"),
+        font,
+        MARKER_COLOR,
+    );
 }
 
 fn draw_grid(painter: &egui::Painter, mapping: &PlotMapping, units: spectra_core::PowerUnits) {
