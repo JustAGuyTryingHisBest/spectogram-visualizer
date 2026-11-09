@@ -9,6 +9,7 @@ use spectra_dsp::ChainWorker;
 use spectra_sources::SeifySource;
 
 use crate::colormap::Colormap;
+use crate::layout::{self, SavedLayout};
 use crate::source_panel::draw_source_panel;
 use crate::sources::SourceManager;
 use crate::spectrum_plot::draw_spectrum;
@@ -42,8 +43,68 @@ impl App {
         };
         if let Some(path) = sigmf_path {
             app.open_sigmf(path);
+        } else if let Some(layout_path) = layout::default_path()
+            && layout_path.exists()
+        {
+            match layout::load(&layout_path) {
+                Ok(saved) => app.restore(saved),
+                Err(error) => app.error = Some(format!("{error:#}")),
+            }
         }
         app
+    }
+
+    /// Rebuilds sources and views from a saved layout; sources that fail to reopen leave
+    /// their views in place showing the error rather than aborting the restore.
+    fn restore(&mut self, saved: SavedLayout) {
+        let mut failures = Vec::new();
+        for (id, source) in &saved.sources {
+            if let Err(error) = self.sources.reopen(*id, source) {
+                failures.push(format!("source {id}: {error:#}"));
+            }
+        }
+        for view in saved.views {
+            let view_id = view.id;
+            let mut runtime = ViewRuntime::new(view);
+            match self.sources.get(runtime.view.source_id) {
+                Some(SourceHandle::Iq(source)) => {
+                    runtime.worker = Some(ChainWorker::spawn(
+                        source.subscribe(),
+                        runtime.view.config.clone(),
+                        256,
+                    ));
+                }
+                Some(SourceHandle::Spectrum(source)) => {
+                    runtime.spectrum_input = Some(source.subscribe());
+                }
+                None => {}
+            }
+            self.next_view_id = self.next_view_id.max(view_id);
+            self.views.insert(view_id, runtime);
+        }
+        self.dock = saved.dock;
+        self.selected_source = self.sources.ids().first().copied();
+        if !failures.is_empty() {
+            self.error = Some(failures.join("; "));
+        }
+    }
+
+    fn save_layout(&self) {
+        let Some(path) = layout::default_path() else {
+            return;
+        };
+        let layout = SavedLayout {
+            dock: self.dock.clone(),
+            views: self
+                .views
+                .values()
+                .map(|runtime| runtime.view.clone())
+                .collect(),
+            sources: self.sources.saved(),
+        };
+        if let Err(error) = layout::save(&path, &layout) {
+            eprintln!("saving layout: {error:#}");
+        }
     }
 
     fn open_sigmf(&mut self, path: &Path) {
@@ -169,6 +230,17 @@ impl App {
         });
     }
 
+    /// Median of the newest row of the first view: a cheap, robust noise-floor estimate.
+    fn noise_floor_db(&self) -> Option<f32> {
+        let frame = self
+            .views
+            .values()
+            .find_map(|runtime| runtime.ring.latest())?;
+        let mut sorted: Vec<f32> = frame.row.power_db.to_vec();
+        sorted.sort_by(f32::total_cmp);
+        sorted.get(sorted.len() / 2).copied()
+    }
+
     fn fps(&mut self) -> f32 {
         let now = Instant::now();
         self.frame_times.push(now);
@@ -179,6 +251,10 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        self.save_layout();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         for runtime in self.views.values_mut() {
             runtime.drain_worker(&self.colormap);
@@ -216,6 +292,9 @@ impl eframe::App for App {
                 }
                 ui.label(format!("{} views", self.views.len()));
                 ui.label(format!("rows/s {rows_per_second:.0}"));
+                if let Some(floor_db) = self.noise_floor_db() {
+                    ui.label(format!("floor {floor_db:.0} dB"));
+                }
                 ui.label(format!("drops {total_drops}"));
                 if overloaded {
                     ui.colored_label(egui::Color32::RED, "OVERLOAD");

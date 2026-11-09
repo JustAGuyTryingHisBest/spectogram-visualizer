@@ -17,4 +17,7 @@ eframe.workspace = true
 egui.workspace = true
 serde.workspace = true
 rfd.workspace = true
-egui_dock.workspace = true
+seify.workspace = true
+egui_dock = { workspace = true, features = ["serde"] }
+ron.workspace = true
+dirs.workspace = true

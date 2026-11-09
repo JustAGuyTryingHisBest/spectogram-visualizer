@@ -1,5 +1,6 @@
 mod app;
 mod colormap;
+mod layout;
 mod markers;
 mod source_panel;
 mod sources;
