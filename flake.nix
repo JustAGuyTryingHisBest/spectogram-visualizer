@@ -29,7 +29,11 @@
               rustfmt
               rust-analyzer
               pkg-config
+              zstd
             ];
+
+            # Link nixpkgs' libzstd instead of compiling the vendored copy in zstd-sys.
+            env.ZSTD_SYS_USE_PKG_CONFIG = "1";
           };
         }
       );
