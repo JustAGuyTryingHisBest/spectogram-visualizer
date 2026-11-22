@@ -1,11 +1,52 @@
 use spectra_core::{IqSource, ParamKind, ParamValue};
 
-/// Renders every parameter a source describes; the panel knows nothing about the device.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum PanelTab {
+    #[default]
+    Controls,
+    Metadata,
+}
+
+/// Renders a source's header, then its controls, plus a metadata tab when the source has any.
+/// The panel knows nothing about the device.
 pub fn draw_source_panel(ui: &mut egui::Ui, source: &mut dyn IqSource) -> Option<String> {
-    let mut error = None;
     ui.heading(source.info().name);
     ui.label(format!("{:?}", source.status()));
+
+    let tab_id = egui::Id::new("source_panel_tab");
+    let mut selected_tab: PanelTab = ui.data(|data| data.get_temp(tab_id).unwrap_or_default());
+    if source.metadata().is_none() {
+        selected_tab = PanelTab::Controls;
+    } else {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut selected_tab, PanelTab::Controls, "Controls");
+            ui.selectable_value(&mut selected_tab, PanelTab::Metadata, "Metadata");
+        });
+        ui.data_mut(|data| data.insert_temp(tab_id, selected_tab));
+    }
     ui.separator();
+
+    match (selected_tab, source.metadata()) {
+        (PanelTab::Metadata, Some(metadata)) => {
+            draw_metadata(ui, metadata);
+            None
+        }
+        _ => draw_controls(ui, source),
+    }
+}
+
+/// Monospace, unwrapped metadata text that scrolls both ways inside the panel.
+fn draw_metadata(ui: &mut egui::Ui, metadata: &str) {
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(metadata).monospace()).extend());
+        });
+}
+
+/// Renders every parameter a source describes and applies edits; returns the last set error.
+fn draw_controls(ui: &mut egui::Ui, source: &mut dyn IqSource) -> Option<String> {
+    let mut error = None;
     for spec in source.params() {
         let Some(current) = source.param(&spec.key) else {
             continue;

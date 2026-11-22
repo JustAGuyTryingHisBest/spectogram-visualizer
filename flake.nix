@@ -15,6 +15,10 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
     in
     {
+      packages = forAllSystems (system: {
+        default = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
+      });
+
       devShells = forAllSystems (
         system:
         let

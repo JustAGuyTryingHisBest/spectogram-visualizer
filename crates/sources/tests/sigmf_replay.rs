@@ -29,6 +29,21 @@ fn position_param_seeks_while_paused() {
     assert!(source.params().iter().any(|spec| spec.key == "position"));
 }
 
+#[test]
+fn exposes_metadata_in_file_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let meta = write_recording(dir.path(), "cf32_le", &cf32_bytes(16), 1e6);
+    let source = SigmfSource::open(&meta).unwrap();
+    let metadata = source.metadata().unwrap();
+    assert!(
+        metadata.contains("\"core:sample_rate\": 1000000,"),
+        "{metadata}"
+    );
+    let global_at = metadata.find("\"global\"").unwrap();
+    let annotations_at = metadata.find("\"annotations\"").unwrap();
+    assert!(global_at < annotations_at, "{metadata}");
+}
+
 fn write_recording(dir: &Path, datatype: &str, data: &[u8], sample_rate: f64) -> PathBuf {
     let meta_path = dir.join("rec.sigmf-meta");
     let meta = format!(

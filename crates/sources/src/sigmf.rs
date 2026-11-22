@@ -119,6 +119,8 @@ pub struct SigmfSource {
     total_samples: u64,
     shared: Arc<Shared>,
     broadcast: Arc<Broadcast<IqBlock>>,
+    /// The `.sigmf-meta` document as read at open, pretty-printed in file key order.
+    metadata_text: String,
 }
 
 impl SigmfSource {
@@ -126,8 +128,11 @@ impl SigmfSource {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let meta_text =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        let metadata: Metadata =
+        let metadata_document: serde_json::Value =
             serde_json::from_str(&meta_text).context("parsing SigMF metadata")?;
+        let metadata =
+            Metadata::deserialize(&metadata_document).context("parsing SigMF metadata")?;
+        let metadata_text = serde_json::to_string_pretty(&metadata_document)?;
         let format = SampleFormat::parse(&metadata.global.datatype)?;
         let sample_rate_hz = metadata
             .global
@@ -191,6 +196,7 @@ impl SigmfSource {
             total_samples,
             shared,
             broadcast,
+            metadata_text,
         })
     }
 
@@ -313,6 +319,10 @@ impl IqSource for SigmfSource {
 
     fn status(&self) -> SourceStatus {
         self.shared.status.lock().unwrap().clone()
+    }
+
+    fn metadata(&self) -> Option<&str> {
+        Some(&self.metadata_text)
     }
 }
 

@@ -18,6 +18,10 @@ pub trait IqSource: Send {
     fn param(&self, key: &str) -> Option<ParamValue>;
     fn set_param(&mut self, key: &str, value: ParamValue) -> anyhow::Result<()>;
     fn status(&self) -> SourceStatus;
+    /// Human-readable metadata the source was opened with, such as a recording's header.
+    fn metadata(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Something that already delivers finished spectrum rows.
